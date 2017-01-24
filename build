@@ -1,62 +1,107 @@
 #!/bin/sh
+#
+# Linux build script
+#
+
+# Exit on any unhandled error
 set -e
+[[ -n ${DEBUG-} ]] && set -x
 
-arg0=""
-remainingArgs=""
-
-if [ $# -gt 0 ]; then
-    arg0="$1"
-fi
-
-if [ $# -gt 1 ]; then
-    skippedFirst=false
-    for i in "$@"; do
-        if $skippedFirst; then
-            remainingArgs="$remainingArgs $i"
-        else
-            skippedFirst=true
-        fi
-    done
-fi
-
-nugetVersion="2.8.6"
-useExperimental=false
+# Vars
+#
 rootDir=$(dirname $0)
+
 buildDir="$rootDir/_build"
 toolsDir="$buildDir/tools"
 packagesDir="$buildDir/lib/nuget"
-nugetExe="$toolsDir/NuGet/$nugetVersion/nuget.exe"
 packagesConfigFile="$rootDir/packages.config"
+
 cakeVersion="$(sed -nE "s|\s*<package\s+id=\"Cake\"\s+version=\"(.+)\"\s*/>\s*|\1|p" $packagesConfigFile)"
 cakeExe="$packagesDir/Cake.$cakeVersion/Cake.exe"
 
-nugetDir="$(dirname $nugetExe)"
-if [ ! -d "$nugetDir" ]; then
-    mkdir -p "$nugetDir"
-fi
+useExperimental=false
 
-if [ ! -f "$nugetExe" ]; then
-    curl -L "https://dist.nuget.org/win-x86-commandline/v${nugetVersion}/nuget.exe" --output "$nugetExe"
-fi
 
-mono "$nugetExe" install "$packagesConfigFile" -OutputDirectory "$packagesDir"
+# Functions
+#
+function deb_packages {
+    local pkgs=(nuget libcurl4-openssl-dev mono-complete)
+    for pkg in ${pkgs[@]}; do
+        if [[ ! $(dpkg -i $pkg 2>/dev/null) ]]; then
+            echo "Error: $pkg is not installed"
+            exit 1
+        fi
+    done
+}
 
-cakeArgs=""
+function rpm_packages {
+    local pkgs=(nuget libcurl-devel mono-core)
+    for pkg in ${pkgs[@]}; do
+        if [[ ! $(rpm -q $pkg 2>/dev/null) ]]; then
+            echo "Error: $pkg is not installed"
+            exit 1
+        fi
+    done
+}
 
-if [ -n "$arg0" ]; then
-    case $arg0 in
+function packages {
+    if [[ $(which dpkg 2>/dev/null) ]]; then
+        deb_packages
+    elif [[ $(which dnf 2>/dev/null) ]]; then
+        rpm_packages
+    elif [[ $(which yum 2>/dev/null) ]]; then
+        rpm_packages
+    else
+        echo "ERROR: You're using the linux build script on an unsupported system."
+        exit 1
+    fi
+}
+
+function install_cake {
+    if [[ $(which nuget 2>/dev/null) ]]; then
+        nuget install "$packagesConfigFile" -OutputDirectory "$packagesDir"
+    else
+        # We should probably be using in distro nuget, but this is left for legacy purposes.
+        nugetVersion="2.8.6"
+        nugetExe="$toolsDir/NuGet/$nugetVersion/nuget.exe"
+        nugetDir="$(dirname $nugetExe)"
+        [[ ! -d "$nugetDir" ]] && mkdir -p "$nugetDir"
+        if [[ ! -f "$nugetExe" ]]; then
+            echo "Downloading nuget from the internet. This method may be insecure."
+            wget -o "$nugetExe" "https://dist.nuget.org/win-x86-commandline/v${nugetVersion}/nuget.exe"
+        fi
+        mono "$nugetExe" install "$packagesConfigFile" -OutputDirectory "$packagesDir"
+    fi
+}
+
+function build {
+    mono "$cakeExe" $cakeArgs
+}
+
+
+# Test Input
+#
+if [[ $# -gt 0 ]]; then
+    cakeArgs=($@)
+    case ${cakeArgs[0]} in
         -*)
-            cakeArgs="$cakeArgs $arg0"
+            cakeArgs=("${cakeArgs[@]:1}" ${cakeArgs[0]})
             ;;
         *)
-            cakeArgs="$cakeArgs --target=$arg0"
+            cakeArgs=("${cakeArgs[@]:1}" --target=${cakeArgs[0]})
             ;;
     esac
+else
+    cakeArgs=""
 fi
 
 if $useExperimental; then
     cakeArgs="$cakeArgs --experimental"
 fi
 
-mono "$cakeExe" $cakeArgs $remainingArgs
-exit $?
+# Main
+#
+packages
+install_cake
+build
+
